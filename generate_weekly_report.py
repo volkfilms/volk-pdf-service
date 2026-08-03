@@ -30,11 +30,22 @@ S['note']=ParagraphStyle('nt',fontName='Helvetica-Oblique',fontSize=11,textColor
 S['person']=ParagraphStyle('pe',fontName='Helvetica-Bold',fontSize=12,textColor=NAVY,leading=15)
 D={}
 def esc(t): return _xml_escape(str(t if t is not None else ""))
-def _logo(c,x,y,w):
-    if not LOGO_PATH or not os.path.exists(LOGO_PATH): return
-    from PIL import Image as PILImage
-    img=PILImage.open(LOGO_PATH); h=w*(img.height/img.width)
-    c.drawImage(LOGO_PATH,x,y,width=w,height=h,mask='auto')
+def _logo(c,x,y,w,color=WHITE):
+    V=[(0.98,0.010,0.033,0.966,0.989),(0.94,0.030,0.103,0.897,0.969),(0.90,0.050,0.172,0.827,0.949),(0.86,0.069,0.241,0.759,0.929),(0.82,0.089,0.268,0.732,0.909),(0.70,0.149,0.325,0.675,0.849),(0.58,0.209,0.384,0.617,0.788),(0.50,0.248,0.423,0.578,0.748),(0.42,0.288,0.461,0.555,0.708),(0.38,0.308,0.480,0.574,0.688),(0.30,0.348,0.519,0.612,0.648)]
+    TIP=(0.02,0.487,0.506)
+    def px(n): return x+n*w
+    def py(n): return y+n*w
+    c.saveState(); c.setFillColor(color)
+    lo=[(r[1],r[0]) for r in V]+[(TIP[1],TIP[0])]; li=[(r[2],r[0]) for r in V]+[(TIP[2],TIP[0])]
+    p=c.beginPath(); p.moveTo(px(lo[0][0]),py(lo[0][1]))
+    for a,b in lo[1:]: p.lineTo(px(a),py(b))
+    for a,b in reversed(li): p.lineTo(px(a),py(b))
+    p.close(); c.drawPath(p,fill=1,stroke=0)
+    rr=[r for r in V if r[0]>=0.30]; ro=[(r[3],r[0]) for r in rr]; ri=[(r[4],r[0]) for r in rr]
+    q=c.beginPath(); q.moveTo(px(ro[0][0]),py(ro[0][1]))
+    for a,b in ro[1:]: q.lineTo(px(a),py(b))
+    for a,b in reversed(ri): q.lineTo(px(a),py(b))
+    q.close(); c.drawPath(q,fill=1,stroke=0); c.restoreState()
 def _fit_font(c,text,font,max_size,min_size,max_w):
     size=max_size
     while size>min_size and c.stringWidth(text,font,size)>max_w: size-=0.5
