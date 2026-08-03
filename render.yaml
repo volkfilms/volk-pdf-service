@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: volk-pdf
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app -b 0.0.0.0:$PORT -w 1 --timeout 120
+    envVars:
+      - key: VOLK_TOKEN
+        value: volk_5z06jvbfidPTgnMLvf47UJVliJjHYUqO
