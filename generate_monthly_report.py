@@ -200,6 +200,31 @@ def chart_formatos(clientes, matriz, fmt_labels):
     d.add(Line(bar_x,bot_pad-4,bar_x+bar_max,bot_pad-4,strokeColor=LINE_SOFT,strokeWidth=0.8))
     _legend_fmt(d,bar_x,bot_pad-18,bar_max,fmt_labels,FMT_COLS)
     return d
+def chart_cumplimiento(labels, pcts):
+    # barra horizontal de % de cumplimiento por cliente; color segun nivel
+    n=len(labels); row_h,gap=20,7; top_pad,bot_pad=6,20
+    h=top_pad+n*row_h+(n-1)*gap+bot_pad; w=CW; lab_w=118; bar_x=lab_w+6
+    bar_max=w-bar_x-52
+    d=Drawing(w,h)
+    for f in (0.25,0.5,0.75,1.0):
+        gx=bar_x+bar_max*f; d.add(Line(gx,bot_pad-4,gx,h-top_pad,strokeColor=LINE_SOFT,strokeWidth=0.5))
+        d.add(String(gx,bot_pad-14,"%d%%"%int(f*100),fontName='Helvetica',fontSize=6.5,fillColor=SLATE,textAnchor='middle'))
+    y=h-top_pad-row_h
+    for i in range(n):
+        lab=labels[i]
+        if len(lab)>20: lab=lab[:19]+"..."
+        d.add(String(lab_w,y+row_h/2-3,lab,fontName='Helvetica-Bold',fontSize=8.5,fillColor=TEXT_DARK,textAnchor='end'))
+        pct=max(0,min(100,int(pcts[i])))
+        col=GREEN if pct>=100 else (AMBER if pct>=50 else RED)
+        bh=13; by=y+(row_h-bh)/2
+        # riel de fondo
+        d.add(Rect(bar_x,by,bar_max,bh,fillColor=HexColor("#EEF2F6"),strokeColor=None))
+        wv=bar_max*(pct/100.0)
+        if wv>0: d.add(Rect(bar_x,by,wv,bh,fillColor=col,strokeColor=None))
+        d.add(String(bar_x+bar_max+7,by+3.5,"%d%%"%pct,fontName='Helvetica-Bold',fontSize=8.5,fillColor=col))
+        y-=(row_h+gap)
+    d.add(Line(bar_x,bot_pad-4,bar_x+bar_max,bot_pad-4,strokeColor=LINE_SOFT,strokeWidth=0.8))
+    return d
 def tabla_formatos(headers, filas):
     # headers: [Cliente, Reels, Diseno, ...Total]; filas: [[cliente,n,n,...,total],...]
     data=[[Paragraph(esc(h),S['th']) for h in headers]]
@@ -221,6 +246,44 @@ def tabla_formatos(headers, filas):
     # color de encabezados de formato
     for j in range(1,ncol-1):
         st.append(('TEXTCOLOR',(j,0),(j,0),WHITE))
+    t.setStyle(TableStyle(st))
+    return t
+def celda_cumpl(prod, contr):
+    # Devuelve (texto, color) segun cumplimiento del formato contratado
+    if contr <= 0:
+        return ("-", SLATE)
+    if prod >= contr:
+        return ("%d/%d"%(prod,contr), GREEN)
+    if prod >= contr*0.5:
+        return ("%d/%d"%(prod,contr), AMBER)
+    return ("%d/%d"%(prod,contr), RED)
+def tabla_paquetes(headers, filas):
+    # headers: [Cliente, Reels, Disenos, Carruseles, Lives]
+    # filas: [cliente, reels_prod, reels_contr, dis_prod, dis_contr, carr_prod, carr_contr, live_prod, live_contr]
+    data=[[Paragraph(esc(h),S['th']) for h in headers]]
+    cell_colors=[]  # (row, col, color)
+    ri=1
+    for f in filas:
+        row=[Paragraph(esc(f[0]),S['td_cli'])]
+        # 4 formatos: reels(1,2), dis(3,4), carr(5,6), live(7,8)
+        pares=[(f[1],f[2]),(f[3],f[4]),(f[5],f[6]),(f[7],f[8])]
+        ci=1
+        for (prod,contr) in pares:
+            txt,col=celda_cumpl(int(prod),int(contr))
+            stcell=ParagraphStyle('pc%d%d'%(ri,ci),fontName='Helvetica-Bold',fontSize=8.5,textColor=col,leading=11,alignment=1)
+            row.append(Paragraph(txt,stcell))
+            ci+=1
+        data.append(row)
+        ri+=1
+    ncol=len(headers)
+    rest=(CW-110)/(ncol-1)
+    col_widths=[110]+[rest]*(ncol-1)
+    t=Table(data,colWidths=col_widths)
+    st=[('BACKGROUND',(0,0),(-1,0),NAVY),('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5),
+        ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4),
+        ('LINEBELOW',(0,0),(-1,-1),0.4,LINE_SOFT),
+        ('ROWBACKGROUNDS',(0,1),(-1,-1),[WHITE,HexColor('#F1F5F9')])]
     t.setStyle(TableStyle(st))
     return t
 def build(data,out_path):
@@ -254,7 +317,25 @@ def build(data,out_path):
         matriz=[[int(x) for x in r[1:-1]] for r in pf]
         chf=chart_formatos(clientes,matriz,fmt_labels)
         tf=tabla_formatos(fh,[[str(x) for x in r] for r in pf])
-        story+=[KeepTogether([card("Piezas producidas por cliente y formato",TEAL,[chf,sp(10),tf])]),sp(10)]
+        story+=[KeepTogether([card("Piezas entregadas por cliente y formato (Pauta + Completado)",TEAL,[chf,sp(10),tf])]),sp(10)]
+    # ===== NUEVO: paquete contratado vs producido =====
+    pk=data.get("paquetes",[])
+    ph=data.get("paquete_headers",[])
+    if pk and ph:
+        leyenda=Paragraph('<font color="#475569">Formato <b>producido / contratado</b> en el mes. '
+                          '<font color="#10B981"><b>Verde</b></font> = meta cumplida &nbsp;·&nbsp; '
+                          '<font color="#F59E0B"><b>Ambar</b></font> = parcial &nbsp;·&nbsp; '
+                          '<font color="#EF4444"><b>Rojo</b></font> = por debajo del 50%.</font>',
+                          ParagraphStyle('ley',fontName='Helvetica',fontSize=9,textColor=TEXT_MID,leading=13))
+        tp=tabla_paquetes(ph,pk)
+        # grafica de % de cumplimiento por cliente (producido total / contratado total)
+        cmp_labels=[]; cmp_pcts=[]
+        for r in pk:
+            prod=int(r[1])+int(r[3])+int(r[5])+int(r[7])
+            contr=int(r[2])+int(r[4])+int(r[6])+int(r[8])
+            cmp_labels.append(r[0]); cmp_pcts.append(int(round(prod*100/contr)) if contr else 0)
+        chcmp=chart_cumplimiento(cmp_labels,cmp_pcts)
+        story+=[KeepTogether([card("Cumplimiento de paquete contratado por cliente",BLUE,[leyenda,sp(8),chcmp,sp(10),tp])]),sp(10)]
     for per in pr:
         head=Paragraph('%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(per["nombre"]),per["done"],per["total"],per["pct"]),S['person'])
         inner=[head,sp(6)]
