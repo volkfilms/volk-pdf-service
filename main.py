@@ -1,6 +1,7 @@
 import io, os, tempfile
 from flask import Flask, request, send_file, jsonify
 import generate_weekly_report as gen
+import generate_monthly_report as genm
 app = Flask(__name__)
 TOKEN = os.environ.get("VOLK_TOKEN", "")
 @app.get("/")
@@ -23,6 +24,28 @@ def pdf():
         with tempfile.TemporaryDirectory() as td:
             ruta = os.path.join(td, "reporte.pdf")
             gen.build(data, ruta)
+            with open(ruta, "rb") as f:
+                blob = f.read()
+    except Exception as e:
+        return jsonify({"error": "fallo generando PDF", "detalle": str(e)}), 500
+    return send_file(io.BytesIO(blob), mimetype="application/pdf", as_attachment=True, download_name=nombre)
+@app.post("/pdf-mensual")
+def pdf_mensual():
+    if TOKEN and request.headers.get("X-Volk-Token", "") != TOKEN:
+        return jsonify({"error": "token invalido"}), 401
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "se esperaba JSON"}), 400
+    data.setdefault("titulo", "Cierre Mensual de Operaciones - Volk")
+    data.setdefault("responsable", "Raul Lopez")
+    data.setdefault("kpi", {"completadas": 0, "pendientes": 0, "cumplimiento": 0})
+    nombre = data.get("output_filename") or "Reporte_Mensual_Operaciones_VOLK_MEDIA.pdf"
+    if not nombre.lower().endswith(".pdf"):
+        nombre += ".pdf"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            ruta = os.path.join(td, "reporte.pdf")
+            genm.build(data, ruta)
             with open(ruta, "rb") as f:
                 blob = f.read()
     except Exception as e:
