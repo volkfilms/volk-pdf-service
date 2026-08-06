@@ -19,7 +19,8 @@ SLATE=HexColor("#94A3B8"); TEXT_DARK=HexColor("#1E293B"); TEXT_MID=HexColor("#47
 LINE_SOFT=HexColor("#E2E8F0"); CARD_BG=HexColor("#F8FAFC"); PILL_TEAL=HexColor("#EAF6FE")
 RED=HexColor("#EF4444"); AMBER=HexColor("#F59E0B"); GREEN=HexColor("#10B981")
 BAR_PEND=HexColor("#CBD5E1")
-CHIP_MAP={"COMPLETADA":GREEN,"PENDIENTE":AMBER,"ATRASADA":RED}
+GREEN_SOFT=HexColor("#22C55E")
+CHIP_MAP={"COMPLETADA":GREEN,"ENTREGADA":GREEN_SOFT,"PENDIENTE":AMBER,"ATRASADA":RED}
 # Paleta por formato (para barras apiladas y encabezados de tabla)
 FMT_COLS=[HexColor("#EF4444"),HexColor("#A78BFA"),HexColor("#F59E0B"),HexColor("#94A3B8"),HexColor("#60A5FA"),HexColor("#F472B6"),HexColor("#10B981")]
 MARGIN_X=42; HERO_H=196; MINI_H=60; FOOTER_H=30; CW=WIDTH-2*MARGIN_X-24
