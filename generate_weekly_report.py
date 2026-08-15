@@ -177,14 +177,30 @@ def build(data,out_path):
     if pc:
         ch2=chart_barras([x["nombre"] for x in pc],[x["done"] for x in pc],[x["pend"] for x in pc])
         story+=[KeepTogether([card("Entregas por cliente",BLUE,[ch2])]),sp(10)]
+    LOTE=12
     for per in pr:
-        head=Paragraph('%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(per["nombre"]),per["done"],per["total"],per["pct"]),S['person'])
-        inner=[head,sp(6)]
-        if per.get("tareas"): inner.append(task_rows(per["tareas"]))
-        else: inner.append(Paragraph("Sin tareas con fecha de esta semana.",S['sub']))
-        story+=[KeepTogether([card(None,TEAL if per["pct"]>=70 else AMBER,inner)]),sp(10)]
+        tareas=per.get("tareas") or []
+        color=TEAL if per["pct"]>=70 else AMBER
+        if not tareas:
+            head=Paragraph('%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(per["nombre"]),per["done"],per["total"],per["pct"]),S['person'])
+            story+=[KeepTogether([card(None,color,[head,sp(6),Paragraph("Sin tareas con fecha de esta semana.",S['sub'])])]),sp(10)]
+            continue
+        total_lotes=(len(tareas)+LOTE-1)//LOTE
+        for li in range(total_lotes):
+            trozo=tareas[li*LOTE:(li+1)*LOTE]
+            if li==0:
+                titulo='%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(per["nombre"]),per["done"],per["total"],per["pct"])
+            else:
+                titulo='%s <font size="9" color="#94A3B8">- continuacion (%d de %d)</font>'%(esc(per["nombre"]),li+1,total_lotes)
+            head=Paragraph(titulo,S['person'])
+            story+=[KeepTogether([card(None,color,[head,sp(6),task_rows(trozo)])]),sp(10)]
     if data.get("arrastre"):
-        story+=[KeepTogether([card("Arrastre de semanas anteriores (%d) - no cuenta en el cumplimiento"%len(data["arrastre"]),AMBER,[task_rows(data["arrastre"])])]),sp(10)]
+        arr=data["arrastre"]
+        total_arr=(len(arr)+LOTE-1)//LOTE
+        for ai in range(total_arr):
+            trozo=arr[ai*LOTE:(ai+1)*LOTE]
+            tit="Pendientes de semanas anteriores (%d)"%len(arr) if ai==0 else "Pendientes de semanas anteriores - continuacion (%d de %d)"%(ai+1,total_arr)
+            story+=[KeepTogether([card(tit,AMBER,[task_rows(trozo)])]),sp(10)]
     if data.get("notas"):
         story+=[card("Notas",SLATE,[Paragraph(esc(data["notas"]),S['note'])])]
     doc.build(story); return out_path
