@@ -1,4 +1,4 @@
-import os, sys, json
+import os, sys, json, copy, re, unicodedata
 from xml.sax.saxutils import escape as _xml_escape
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.colors import HexColor
@@ -6,6 +6,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer,
     Table, TableStyle, KeepTogether, NextPageTemplate)
+from reportlab.platypus.doctemplate import LayoutError
 from reportlab.graphics.shapes import Drawing, Rect, String, Line
 WIDTH, HEIGHT = A4
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +36,29 @@ S['th']=ParagraphStyle('th',fontName='Helvetica-Bold',fontSize=8,textColor=WHITE
 S['td']=ParagraphStyle('td',fontName='Helvetica',fontSize=8.5,textColor=TEXT_DARK,leading=11,alignment=1)
 S['td_cli']=ParagraphStyle('tdc',fontName='Helvetica-Bold',fontSize=8.5,textColor=NAVY,leading=11,alignment=0)
 D={}
-def esc(t): return _xml_escape(str(t if t is not None else ""))
+_MAPA_PDF={"\u2212":"-","\u2010":"-","\u2011":"-","\u2192":"->","\u2190":"<-","\u2264":"<=","\u2265":">="}
+def texto_pdf(t):
+    # Helvetica (fuente estandar del PDF) solo dibuja cp1252: los emojis de los estados de Notion
+    # salian como un cuadro negro y los acentos "sueltos" (NFD) como letras raras. Se juntan los
+    # acentos, los espacios raros pasan a espacio normal, se quitan los caracteres de control y
+    # lo que no existe en cp1252 se aproxima (r de r con acento, fi de la ligadura) o se omite.
+    t=unicodedata.normalize("NFC",str(t if t is not None else ""))
+    t=re.sub(r"\s+"," ",t)
+    out=[]
+    for ch in t:
+        ch=_MAPA_PDF.get(ch,ch)
+        if len(ch)==1 and unicodedata.category(ch) in ("Cc","Cf","Cs","Co","Cn"): continue
+        try:
+            ch.encode("cp1252"); out.append(ch); continue
+        except UnicodeEncodeError:
+            pass
+        alt="".join(c for c in unicodedata.normalize("NFKD",ch) if not unicodedata.combining(c))
+        try:
+            alt.encode("cp1252"); out.append(alt)
+        except UnicodeEncodeError:
+            pass
+    return re.sub(r" +"," ","".join(out)).strip()
+def esc(t): return _xml_escape(texto_pdf(t))
 def _logo(c,x,y,w,color=WHITE):
     V=[(0.98,0.010,0.033,0.966,0.989),(0.94,0.030,0.103,0.897,0.969),(0.90,0.050,0.172,0.827,0.949),(0.86,0.069,0.241,0.759,0.929),(0.82,0.089,0.268,0.732,0.909),(0.70,0.149,0.325,0.675,0.849),(0.58,0.209,0.384,0.617,0.788),(0.50,0.248,0.423,0.578,0.748),(0.42,0.288,0.461,0.555,0.708),(0.38,0.308,0.480,0.574,0.688),(0.30,0.348,0.519,0.612,0.648)]
     TIP=(0.02,0.487,0.506)
@@ -75,13 +98,13 @@ def draw_hero(c,doc):
     c.setFont('Helvetica',12); c.setFillColor(TEAL); c.drawString(tx+vw,HEIGHT-44,"MEDIA")
     c.setFont('Helvetica-Bold',9); c.setFillColor(TEAL)
     c.drawString(MARGIN_X,HEIGHT-86,"R E P O R T E   M E N S U A L   D E   O P E R A C I O N E S")
-    titulo=D.get("titulo","Cierre Mensual de Operaciones")
+    titulo=corto(texto_pdf(D.get("titulo","Cierre Mensual de Operaciones")),70)
     fs=_fit_font(c,titulo,'Helvetica-Bold',22,13,WIDTH-2*MARGIN_X)
     c.setFont('Helvetica-Bold',fs); c.setFillColor(WHITE); c.drawString(MARGIN_X,HEIGHT-110,titulo)
     c.setFont('Helvetica',10); c.setFillColor(WHITE_DIM)
-    c.drawString(MARGIN_X,HEIGHT-127,"Responsable:  "+str(D.get('responsable','Raul Lopez')))
+    c.drawString(MARGIN_X,HEIGHT-127,"Responsable:  "+corto(texto_pdf(D.get('responsable','Raul Lopez')),40))
     k=D.get("kpi",{})
-    stats=[("MES",D.get("semana_label","")),("COMPLETADAS",str(k.get("completadas",0))),
+    stats=[("MES",corto(texto_pdf(D.get("semana_label","")),30)),("COMPLETADAS",str(k.get("completadas",0))),
            ("PENDIENTES",str(k.get("pendientes",0))),("CUMPLIMIENTO","%s%%"%k.get('cumplimiento',0))]
     sy=HEIGHT-171; col_w=(WIDTH-2*MARGIN_X)/4
     for i,(lab,val) in enumerate(stats):
@@ -103,37 +126,60 @@ def draw_mini(c,doc):
     c.setFont('Helvetica-Bold',12); c.setFillColor(WHITE_DIM)
     c.drawRightString(WIDTH-MARGIN_X,HEIGHT-38,"%02d"%doc.page)
     _footer(c,doc)
-def card(title,accent,inner_flowables):
+def _celda(f):
+    # Cada elemento de la tarjeta va en su propia celda de ancho CW (igual que antes)
+    t=Table([[f]],colWidths=[CW])
+    t.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
+    return t
+def card(title,accent,inner_flowables,repetir_encabezado=False):
+    # Tarjeta con barra de color. Cada elemento va en su propia FILA de la tabla: asi la
+    # tarjeta puede seguir en la pagina siguiente cuando no cabe entera. Antes era una sola
+    # celda y un responsable con muchas tareas rompia el PDF (LayoutError, 25-sep-2026).
+    # repetir_encabezado: la primera fila (titulo o nombre) se repite en cada pagina.
+    # Si la tarjeta se corta, la parte de arriba queda abierta abajo: es la senal de que sigue.
     rows=[]
     if title:
         tr=Table([[Paragraph(esc(title),S['card_title'])]],colWidths=[CW])
         tr.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
         rows.append(tr)
-    inner=rows+inner_flowables
-    inner_tbl=Table([[f] for f in inner],colWidths=[CW])
-    inner_tbl.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
-    outer=Table([['',inner_tbl]],colWidths=[4,WIDTH-2*MARGIN_X-4])
-    outer.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),accent),('BACKGROUND',(1,0),(1,-1),CARD_BG),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(1,0),(1,-1),14),('RIGHTPADDING',(1,0),(1,-1),14),('TOPPADDING',(1,0),(1,-1),12),('BOTTOMPADDING',(1,0),(1,-1),12),('LEFTPADDING',(0,0),(0,-1),0),('RIGHTPADDING',(0,0),(0,-1),0),('BOX',(0,0),(-1,-1),0.6,LINE_SOFT)]))
+    inner=rows+list(inner_flowables)
+    if not inner: inner=[Spacer(1,0)]
+    filas=[[Spacer(0,0),_celda(f)] for f in inner]
+    rep=1 if (repetir_encabezado and len(filas)>1) else 0
+    outer=Table(filas,colWidths=[4,WIDTH-2*MARGIN_X-4],repeatRows=rep)
+    outer.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),accent),('BACKGROUND',(1,0),(1,-1),CARD_BG),('VALIGN',(0,0),(-1,-1),'TOP'),
+        ('LEFTPADDING',(1,0),(1,-1),14),('RIGHTPADDING',(1,0),(1,-1),14),
+        ('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0),
+        ('TOPPADDING',(1,0),(1,0),12),('BOTTOMPADDING',(1,-1),(1,-1),12),
+        ('LEFTPADDING',(0,0),(0,-1),0),('RIGHTPADDING',(0,0),(0,-1),0),('BOX',(0,0),(-1,-1),0.6,LINE_SOFT)]))
+    if len(filas)>1: outer.setStyle(TableStyle([('NOSPLIT',(0,0),(-1,1))]))  # el titulo nunca queda solo al pie
+    outer.spaceAfter=10  # antes era un Spacer suelto que podia dejar una pagina en blanco
     return outer
 def status_chip(text):
     color=CHIP_MAP.get(text,SLATE)
     t=Table([[Paragraph('<font color="#FFFFFF"><b>%s</b></font>'%esc(text),ParagraphStyle('p',fontName='Helvetica-Bold',fontSize=7.5,alignment=1,leading=9.5))]],colWidths=[74],rowHeights=[16])
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),color),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(0,0),(-1,-1),'CENTER'),('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),('TOPPADDING',(0,0),(-1,-1),1),('BOTTOMPADDING',(0,0),(-1,-1),1),('ROUNDEDCORNERS',[3,3,3,3])]))
     return t
-def task_rows(items):
-    rows=[]
-    for row in items:
-        tarea,cliente,estado,fecha,chip=(list(row)+["","","","","PENDIENTE"])[:5]
-        meta=" - ".join([x for x in [cliente,estado] if x])
-        body=Table([[Paragraph(esc(tarea),S['task'])],[Paragraph(esc(meta),S['sub'])]],colWidths=[CW-62-78])
+LIMITE_TEXTO=220
+def corto(t,n=LIMITE_TEXTO):
+    t=str(t if t is not None else "")
+    return t if len(t)<=n else t[:n-3].rstrip()+"..."
+def task_row_list(items):
+    # Una tabla por tarea: cada una es una fila de la tarjeta y la tarjeta puede partirse entre paginas
+    out=[]
+    for row in items or []:
+        if not isinstance(row,(list,tuple)): continue
+        fila=list(row)[:5]; fila+=[""]*(5-len(fila))
+        tarea,cliente,estado,fecha,chip=fila
+        chip=chip or "PENDIENTE"
+        meta=" - ".join([corto(x,90) for x in [cliente,estado] if x])
+        body=Table([[Paragraph(esc(corto(tarea)),S['task'])],[Paragraph(esc(meta),S['sub'])]],colWidths=[CW-62-78])
         body.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),1)]))
-        fech=Paragraph(esc(fecha),ParagraphStyle('fe',fontName='Helvetica',fontSize=9,textColor=TEXT_MID,leading=12,alignment=2))
-        r=Table([[body,fech,status_chip(chip)]],colWidths=[CW-62-78,58,78])
+        fech=Paragraph(esc(corto(fecha,20)),ParagraphStyle('fe',fontName='Helvetica',fontSize=9,textColor=TEXT_MID,leading=12,alignment=2))
+        r=Table([[body,fech,status_chip(corto(chip,14))]],colWidths=[CW-62-78,58,78])
         r.setStyle(TableStyle([('VALIGN',(0,0),(-1,0),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('ALIGN',(2,0),(2,0),'RIGHT'),('LINEBELOW',(0,0),(-1,-1),0.5,LINE_SOFT)]))
-        rows.append([r])
-    wrap=Table(rows,colWidths=[CW])
-    wrap.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
-    return wrap
+        out.append(r)
+    return out
 def _legend(d,x,y,w):
     items=[("Completadas",TEAL),("Pendientes",BAR_PEND)]; cx=x
     for lab,col in items:
@@ -149,7 +195,7 @@ def chart_barras(labels,done,pend,titulo_eje=""):
         gx=bar_x+bar_max*f; d.add(Line(gx,bot_pad-4,gx,h-top_pad,strokeColor=LINE_SOFT,strokeWidth=0.5))
     y=h-top_pad-row_h
     for i in range(n):
-        lab=labels[i]
+        lab=texto_pdf(labels[i])
         if len(lab)>20: lab=lab[:19]+"..."
         d.add(String(lab_w,y+row_h/2-3,lab,fontName='Helvetica-Bold',fontSize=8.5,fillColor=TEXT_DARK,textAnchor='end'))
         dv,pv=done[i],pend[i]; wd=bar_max*(dv/total_max); wp=bar_max*(pv/total_max)
@@ -187,7 +233,7 @@ def chart_formatos(clientes, matriz, fmt_labels):
         gx=bar_x+bar_max*f; d.add(Line(gx,bot_pad-4,gx,h-top_pad,strokeColor=LINE_SOFT,strokeWidth=0.5))
     y=h-top_pad-row_h
     for i in range(n):
-        lab=clientes[i]
+        lab=texto_pdf(clientes[i])
         if len(lab)>20: lab=lab[:19]+"..."
         d.add(String(lab_w,y+row_h/2-3,lab,fontName='Helvetica-Bold',fontSize=8.5,fillColor=TEXT_DARK,textAnchor='end'))
         bh=13; by=y+(row_h-bh)/2; cx=bar_x
@@ -212,7 +258,7 @@ def chart_cumplimiento(labels, pcts):
         d.add(String(gx,bot_pad-14,"%d%%"%int(f*100),fontName='Helvetica',fontSize=6.5,fillColor=SLATE,textAnchor='middle'))
     y=h-top_pad-row_h
     for i in range(n):
-        lab=labels[i]
+        lab=texto_pdf(labels[i])
         if len(lab)>20: lab=lab[:19]+"..."
         d.add(String(lab_w,y+row_h/2-3,lab,fontName='Helvetica-Bold',fontSize=8.5,fillColor=TEXT_DARK,textAnchor='end'))
         pct=max(0,min(100,int(pcts[i])))
@@ -230,7 +276,7 @@ def tabla_formatos(headers, filas):
     # headers: [Cliente, Reels, Diseno, ...Total]; filas: [[cliente,n,n,...,total],...]
     data=[[Paragraph(esc(h),S['th']) for h in headers]]
     for f in filas:
-        row=[Paragraph(esc(f[0]),S['td_cli'])]
+        row=[Paragraph(esc(corto(f[0],30)),S['td_cli'])]
         for v in f[1:]:
             row.append(Paragraph(esc(v),S['td']))
         data.append(row)
@@ -265,7 +311,7 @@ def tabla_paquetes(headers, filas):
     cell_colors=[]  # (row, col, color)
     ri=1
     for f in filas:
-        row=[Paragraph(esc(f[0]),S['td_cli'])]
+        row=[Paragraph(esc(corto(f[0],30)),S['td_cli'])]
         # 4 formatos: reels(1,2), dis(3,4), carr(5,6), live(7,8)
         pares=[(f[1],f[2]),(f[3],f[4]),(f[5],f[6]),(f[7],f[8])]
         ci=1
@@ -287,7 +333,53 @@ def tabla_paquetes(headers, filas):
         ('ROWBACKGROUNDS',(0,1),(-1,-1),[WHITE,HexColor('#F1F5F9')])]
     t.setStyle(TableStyle(st))
     return t
+MAX_FILAS_COMPACTO=18; MAX_TEXTO_COMPACTO=900
+def _num(x):
+    try: return int(float(x))
+    except (TypeError,ValueError): return 0
+def _con_nota(d,nota):
+    d["notas"]=(texto_pdf(d.get("notas"))+"  "+nota) if d.get("notas") else nota
+    d["periodo_bar"]="(Version compacta) "+texto_pdf(d.get("periodo_bar") or "")
+    return d
+def _compactar(data):
+    # Nivel 2: algo no entra en la pagina (p. ej. mas de ~22 clientes en un grafico). Se recortan
+    # graficos, tablas y textos largos. Las tareas NO se recortan: se parten entre paginas.
+    d=copy.deepcopy(data)
+    for k in ("por_cliente","por_formato","paquetes"):
+        if isinstance(d.get(k),list) and len(d[k])>MAX_FILAS_COMPACTO: d[k]=d[k][:MAX_FILAS_COMPACTO]
+    for k in ("por_formato","paquetes"):
+        for r in d.get(k) or []:
+            if isinstance(r,list) and r: r[0]=corto(r[0],24)
+    d["_max_grafico"]=MAX_FILAS_COMPACTO
+    for k in ("resumen","notas","periodo_bar"):
+        if d.get(k): d[k]=corto(d[k],MAX_TEXTO_COMPACTO)
+    return _con_nota(d,"Reporte compacto: habia graficos o textos demasiado grandes para el PDF y se recortaron. El detalle completo esta en Notion.")
+def _minimo(data,motivo):
+    # Nivel 3: solo portada, KPIs, resumen y una nota. Siempre entra en una pagina.
+    k=data.get("kpi") if isinstance(data.get("kpi"),dict) else {}
+    d={"titulo":corto(texto_pdf(data.get("titulo") or "Cierre Mensual de Operaciones - Volk"),70),
+       "responsable":corto(texto_pdf(data.get("responsable") or "Raul Lopez"),40),
+       "semana_label":corto(texto_pdf(data.get("semana_label") or ""),30),
+       "kpi":{"completadas":_num(k.get("completadas")),"pendientes":_num(k.get("pendientes")),"cumplimiento":_num(k.get("cumplimiento"))},
+       "periodo_bar":corto(texto_pdf(data.get("periodo_bar") or ""),300),
+       "resumen":corto(texto_pdf(data.get("resumen") or ""),MAX_TEXTO_COMPACTO)}
+    return _con_nota(d,"No se pudo armar el detalle del reporte (%s). Los numeros de arriba son correctos; el detalle por persona y cliente esta en Notion."%corto(motivo,160))
 def build(data,out_path):
+    # Nivel 1 normal; si algo no entra, nivel 2 compacto; si aun asi falla, nivel 3 minimo.
+    # Asi el servicio responde un PDF en vez de un error 500 (incidente del 25-sep-2026).
+    try:
+        return _build(data,out_path)
+    except LayoutError as e:
+        print("PDF mensual: modo compacto (%s)"%str(e)[:200],flush=True)
+        try:
+            return _build(_compactar(data),out_path)
+        except Exception as e2:
+            print("PDF mensual: modo minimo (%s)"%str(e2)[:200],flush=True)
+            return _build(_minimo(data,type(e2).__name__),out_path)
+    except Exception as e:
+        print("PDF mensual: datos inesperados, modo minimo (%s: %s)"%(type(e).__name__,str(e)[:200]),flush=True)
+        return _build(_minimo(data,type(e).__name__),out_path)
+def _build(data,out_path):
     global D; D=data
     doc=BaseDocTemplate(out_path,pagesize=A4,leftMargin=MARGIN_X,rightMargin=MARGIN_X,topMargin=HERO_H+14,bottomMargin=FOOTER_H+16,title="Reporte Mensual de Operaciones - Volk Media",author="Volk Media")
     frame_first=Frame(MARGIN_X,FOOTER_H+16,WIDTH-2*MARGIN_X,HEIGHT-(HERO_H+14)-(FOOTER_H+16),id='first',leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)
@@ -300,15 +392,16 @@ def build(data,out_path):
         t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),PILL_TEAL),('LEFTPADDING',(0,0),(-1,-1),12),('RIGHTPADDING',(0,0),(-1,-1),12),('TOPPADDING',(0,0),(-1,-1),9),('BOTTOMPADDING',(0,0),(-1,-1),9),('LINEBEFORE',(0,0),(0,-1),3,TEAL)]))
         story+=[t,sp(12)]
     if data.get("resumen"):
-        story+=[card("Resumen del mes",BLUE,[Paragraph(esc(data["resumen"]),S['body'])]),sp(10)]
+        story+=[card("Resumen del mes",BLUE,[Paragraph(esc(data["resumen"]),S['body'])])]
     pr=data.get("por_responsable",[])
     if pr:
-        ch=chart_barras([x["nombre"] for x in pr],[x["done"] for x in pr],[max(x["total"]-x["done"],0) for x in pr])
-        story+=[KeepTogether([card("Cumplimiento por responsable",TEAL,[ch])]),sp(10)]
+        prg=pr[:data.get("_max_grafico") or len(pr)]
+        ch=chart_barras([x["nombre"] for x in prg],[x["done"] for x in prg],[max(x["total"]-x["done"],0) for x in prg])
+        story+=[KeepTogether([card("Cumplimiento por responsable",TEAL,[ch])])]
     pc=data.get("por_cliente",[])
     if pc:
         ch2=chart_barras([x["nombre"] for x in pc],[x["done"] for x in pc],[x["pend"] for x in pc])
-        story+=[KeepTogether([card("Entregas por cliente",BLUE,[ch2])]),sp(10)]
+        story+=[KeepTogether([card("Entregas por cliente",BLUE,[ch2])])]
     # ===== NUEVO: piezas por cliente y formato =====
     pf=data.get("por_formato",[])
     fh=data.get("formato_headers",[])
@@ -318,7 +411,7 @@ def build(data,out_path):
         matriz=[[int(x) for x in r[1:-1]] for r in pf]
         chf=chart_formatos(clientes,matriz,fmt_labels)
         tf=tabla_formatos(fh,[[str(x) for x in r] for r in pf])
-        story+=[KeepTogether([card("Piezas entregadas por cliente y formato (Pauta + Completado)",TEAL,[chf,sp(10),tf])]),sp(10)]
+        story+=[KeepTogether([card("Piezas entregadas por cliente y formato (Pauta + Completado)",TEAL,[chf,sp(10),tf])])]
     # ===== NUEVO: paquete contratado vs producido =====
     pk=data.get("paquetes",[])
     ph=data.get("paquete_headers",[])
@@ -336,15 +429,15 @@ def build(data,out_path):
             contr=int(r[2])+int(r[4])+int(r[6])+int(r[8])
             cmp_labels.append(r[0]); cmp_pcts.append(int(round(prod*100/contr)) if contr else 0)
         chcmp=chart_cumplimiento(cmp_labels,cmp_pcts)
-        story+=[KeepTogether([card("Cumplimiento de paquete contratado por cliente",BLUE,[leyenda,sp(8),chcmp,sp(10),tp])]),sp(10)]
+        story+=[KeepTogether([card("Cumplimiento de paquete contratado por cliente",BLUE,[leyenda,sp(8),chcmp,sp(10),tp])])]
     for per in pr:
-        head=Paragraph('%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(per["nombre"]),per["done"],per["total"],per["pct"]),S['person'])
-        inner=[head,sp(6)]
-        if per.get("tareas"): inner.append(task_rows(per["tareas"]))
-        else: inner.append(Paragraph("Sin tareas con fecha de este mes.",S['sub']))
-        story+=[KeepTogether([card(None,TEAL if per["pct"]>=70 else AMBER,inner)]),sp(10)]
+        head=Paragraph('%s <font size="9" color="#94A3B8">- %d/%d completadas - %d%%</font>'%(esc(corto(per["nombre"],60)),per["done"],per["total"],per["pct"]),S['person'])
+        cab=Table([[head]],colWidths=[CW])
+        cab.setStyle(TableStyle([('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
+        filas=task_row_list(per.get("tareas")) or [Paragraph("Sin tareas con fecha de este mes.",S['sub'])]
+        story+=[card(None,TEAL if per["pct"]>=70 else AMBER,[cab]+filas,repetir_encabezado=True)]
     if data.get("arrastre"):
-        story+=[KeepTogether([card("Arrastre de meses anteriores (%d) - no cuenta en el cumplimiento"%len(data["arrastre"]),AMBER,[task_rows(data["arrastre"])])]),sp(10)]
+        story+=[card("Arrastre de meses anteriores (%d) - no cuenta en el cumplimiento"%len(data["arrastre"]),AMBER,task_row_list(data["arrastre"]),repetir_encabezado=True)]
     if data.get("notas"):
         story+=[card("Notas",SLATE,[Paragraph(esc(data["notas"]),S['note'])])]
     doc.build(story); return out_path
